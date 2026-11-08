@@ -6,6 +6,7 @@ from typing import List, Tuple
 class InterpolationResult:
     estimated_value: float
     estimated_error: float
+    tableau: tuple[tuple[float, ...], ...] = ()
 
 
 def lagrange_interpolate(points: List[Tuple[float, float]], target_t: float) -> float:
@@ -57,5 +58,10 @@ def neville_interpolate(points: List[Tuple[float, float]], target_t: float) -> I
     best_estimate = q[n - 1][n - 1]
     # La diferencia con la aproximacion del grado anterior sirve como indicador del residuo
     estimated_error = abs(q[n - 1][n - 1] - q[n - 1][n - 2]) if n > 1 else 0.0
+    tableau = tuple(tuple(row) for row in q)
 
-    return InterpolationResult(estimated_value=best_estimate, estimated_error=estimated_error)
+    return InterpolationResult(
+        estimated_value=best_estimate,
+        estimated_error=estimated_error,
+        tableau=tableau,
+    )

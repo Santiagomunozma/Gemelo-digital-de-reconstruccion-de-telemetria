@@ -9,6 +9,15 @@ class IntegrationResult:
     value: float
     function_evaluations: int
     estimated_error: float
+    tableau: tuple[tuple[float, ...], ...] = ()
+
+
+def _romberg_triangle(table: List[List[float]], last_row: int) -> tuple[tuple[float, ...], ...]:
+    """Conserva el triángulo inferior de Romberg, fila 0..last_row."""
+    return tuple(
+        tuple(table[row][col] for col in range(row + 1))
+        for row in range(last_row + 1)
+    )
 
 
 def composite_trapezoidal(f: Callable[[float], float], a: float, b: float, n: int) -> float:
@@ -79,12 +88,14 @@ def romberg_integration(
                 method="Romberg (Richardson)",
                 value=r[i][i],
                 function_evaluations=eval_count,
-                estimated_error=error_est
+                estimated_error=error_est,
+                tableau=_romberg_triangle(r, i),
             )
 
     return IntegrationResult(
         method="Romberg (Richardson)",
         value=r[max_order][max_order],
         function_evaluations=eval_count,
-        estimated_error=abs(r[max_order][max_order] - r[max_order - 1][max_order - 1])
+        estimated_error=abs(r[max_order][max_order] - r[max_order - 1][max_order - 1]),
+        tableau=_romberg_triangle(r, max_order),
     )

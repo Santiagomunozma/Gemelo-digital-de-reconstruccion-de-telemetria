@@ -325,7 +325,7 @@ class OrbitalTelemetryHub:
                 last_ping = now
 
             try:
-                data, _ = sock.recvfrom(4096)
+                data, _ = sock.recvfrom(16384)
             except (socket.timeout, ConnectionResetError):
                 continue
             except OSError:
@@ -374,7 +374,11 @@ class OrbitalTelemetryHub:
                                 "timestamp": t_target,
                                 "x": res_x.estimated_value,
                                 "y": res_y.estimated_value,
-                                "error": max(res_x.estimated_error, res_y.estimated_error)
+                                "error": max(res_x.estimated_error, res_y.estimated_error),
+                                "nodes_x": nodes_x,
+                                "nodes_y": nodes_y,
+                                "tableau_x": res_x.tableau,
+                                "tableau_y": res_y.tableau,
                             })
 
                 self._buf.append(pkt)
@@ -481,6 +485,314 @@ def kpi(label: str, value: str, unit: str, state: str, color: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Pizarra: desarrollo numérico en vivo
+# --------------------------------------------------------------------------- #
+def _newton_log_line(pkt: dict) -> str:
+    kepler = pkt.get("kepler") or {}
+    steps = kepler.get("steps") or []
+    ident = f"PKT {int(pkt['id']):02d}"
+    if not steps:
+        return f"{ident} · posición recibida x = {pkt['x']:.2f} km, y = {pkt['y']:.2f} km"
+    last = steps[-1]
+    return (
+        f"{ident} · Kepler–Newton · M = {kepler['M']:.4f} rad · "
+        f"E{last['k'] - 1} = {last['E']:.6f} · "
+        f"f = {last['f']:.2e} · f' = {last['fp']:.6f} · "
+        f"delta = {last['delta']:.2e} · E{last['k']} = {last['E_next']:.6f} · "
+        f"x = {pkt['x']:.2f} km · y = {pkt['y']:.2f} km"
+    )
+
+
+def _neville_log_line(item: dict) -> str:
+    return (
+        f"Hueco PKT {int(item['id']):02d} · Neville · t* = {item['timestamp']:.4f} rad · "
+        f"Q(X) = {item['x']:.2f} km · Q(Y) = {item['y']:.2f} km · "
+        f"cota = {item['error']:.4f} km"
+    )
+
+
+def render_direct_ticker(packets: list[dict], interps: list[dict]) -> None:
+    """Línea de cálculo que cambia con el paquete que acaba de llegar."""
+    pkt = packets[-1]
+    kepler = pkt.get("kepler") or {}
+    steps = kepler.get("steps") or []
+    with st.container(border=True):
+        st.markdown("##### En directo")
+        if steps:
+            last = steps[-1]
+            k = int(last["k"])
+            st.latex(
+                rf"E_{{{k}}}={last['E_next']:.8f}"
+                rf"=E_{{{k - 1}}}-\left(\frac{{{last['f']:.3e}}}{{{last['fp']:.6f}}}\right)"
+                rf"={last['E']:.8f}-({last['delta']:.3e})"
+            )
+            if "a" in kepler and "E" in kepler:
+                a = float(kepler["a"])
+                e = float(kepler["e"])
+                big_e = float(kepler["E"])
+                x_calc = a * (math.cos(big_e) - e)
+                y_calc = a * math.sqrt(max(0.0, 1.0 - e * e)) * math.sin(big_e)
+                st.latex(
+                    rf"x=a(\cos E-e)={x_calc:.2f}\ \mathrm{{km}},\quad "
+                    rf"y=a\sqrt{{1-e^2}}\sin E={y_calc:.2f}\ \mathrm{{km}}"
+                )
+            st.caption(
+                f"Paquete {int(pkt['id']):02d} · {len(steps)} iteraciones · "
+                f"residuo {float(kepler.get('residual', 0.0)):.2e}"
+            )
+        else:
+            st.markdown(
+                f"Paquete {int(pkt['id']):02d} en antena · "
+                f"x = {pkt['x']:.2f} km · y = {pkt['y']:.2f} km"
+            )
+
+        if interps:
+            item = interps[-1]
+            st.latex(
+                rf"Q(t^*)\ \mathrm{{en}}\ t^*={item['timestamp']:.4f}"
+                rf"\rightarrow X={item['x']:.2f}\ \mathrm{{km}},\ "
+                rf"Y={item['y']:.2f}\ \mathrm{{km}},\ "
+                rf"|Q_{{n,n}}-Q_{{n,n-1}}|={item['error']:.4f}\ \mathrm{{km}}"
+            )
+            st.caption(f"Último hueco reconstruido: paquete {int(item['id']):02d}.")
+
+
+def _render_newton_process(pkt: dict) -> None:
+    kepler = pkt.get("kepler") or {}
+    steps = kepler.get("steps") or []
+    st.markdown(f"**Kepler–Newton · paquete {int(pkt['id']):02d}**")
+    if not steps or "M" not in kepler:
+        st.caption("Este paquete llegó sin la traza de Newton. Lanza de nuevo la misión para ver las iteraciones.")
+        return
+
+    m_anom = float(kepler["M"])
+    ecc = float(kepler["e"])
+    axis = float(kepler["a"])
+    big_e = float(kepler["E"])
+    st.latex(r"f(E)=E-e\sin(E)-M=0,\qquad f'(E)=1-e\cos(E)")
+    st.latex(
+        rf"M={m_anom:.6f},\quad e={ecc:.6f},\quad a={axis:.2f}\ \mathrm{{km}}"
+    )
+    if ecc < 0.8:
+        st.caption("Semilla E₀ = M, porque la excentricidad es menor que 0.8.")
+    else:
+        st.caption("Semilla ajustada: excentricidad alta, E₀ parte de π o de M + e sin M.")
+
+    bullets = []
+    for step in steps:
+        k = int(step["k"])
+        bullets.append(
+            f"- Iteración {k}: "
+            f"$E_{{{k}}}={step['E_next']:.8f}"
+            f"=E_{{{k - 1}}}-\\left(\\dfrac{{{step['f']:.3e}}}{{{step['fp']:.6f}}}\\right)"
+            f"={step['E']:.8f}-({step['delta']:.3e})$"
+        )
+    st.markdown("\n".join(bullets))
+
+    frame = pd.DataFrame(
+        [
+            {
+                "Iteración": int(step["k"]),
+                "E actual": f"{step['E']:.8f}",
+                "f(E)": f"{step['f']:.3e}",
+                "f'(E)": f"{step['fp']:.8f}",
+                "Corrección": f"{step['delta']:.3e}",
+                "E siguiente": f"{step['E_next']:.8f}",
+            }
+            for step in steps
+        ]
+    )
+    st.table(frame, hide_index=True, alt="Iteraciones de Newton-Raphson del paquete en antena")
+
+    last = steps[-1]
+    stopped = abs(float(last["delta"])) < 1e-10
+    if stopped:
+        st.caption(f"Parada: |ΔE| = {abs(float(last['delta'])):.2e} < 10⁻¹⁰. Residuo |f(E)| = {float(kepler['residual']):.2e}.")
+    else:
+        st.caption(f"Última corrección |ΔE| = {abs(float(last['delta'])):.2e}. Residuo |f(E)| = {float(kepler['residual']):.2e}.")
+
+    x_calc = axis * (math.cos(big_e) - ecc)
+    y_calc = axis * math.sqrt(max(0.0, 1.0 - ecc * ecc)) * math.sin(big_e)
+    st.latex(
+        rf"x=a(\cos E-e)={axis:.2f}\left(\cos({big_e:.6f})-{ecc:.6f}\right)={x_calc:.2f}\ \mathrm{{km}}"
+    )
+    st.latex(
+        rf"y=a\sqrt{{1-e^2}}\sin E={axis:.2f}\sqrt{{1-({ecc:.6f})^2}}\sin({big_e:.6f})={y_calc:.2f}\ \mathrm{{km}}"
+    )
+    if "nu" in kepler:
+        st.caption(f"Anomalía verdadera ν = {float(kepler['nu']):.6f} rad.")
+
+
+def _neville_substitutions(points: list, tableau: tuple, target_t: float) -> str:
+    lines = []
+    n = len(points)
+    for degree in range(1, n):
+        lines.append(f"**Grado {degree}**")
+        for i in range(degree, n):
+            t_i = float(points[i][0])
+            t_prev = float(points[i - degree][0])
+            q_right = float(tableau[i][degree - 1])
+            q_left = float(tableau[i - 1][degree - 1])
+            q_ij = float(tableau[i][degree])
+            lines.append(
+                f"- $Q_{{{i},{degree}}}"
+                f"=\\dfrac{{({target_t:.4f}-{t_prev:.4f})\\cdot ({q_right:.2f})"
+                f"-({target_t:.4f}-{t_i:.4f})\\cdot ({q_left:.2f})}}"
+                f"{{{t_i:.4f}-{t_prev:.4f}}}"
+                f"={q_ij:.2f}$ km"
+            )
+    return "\n".join(lines)
+
+
+def _neville_frame(points: list, tableau: tuple) -> pd.DataFrame:
+    n = len(points)
+    rows = []
+    for i in range(n):
+        row = {"Nodo": i, "t (rad)": f"{float(points[i][0]):.4f}"}
+        for degree in range(n):
+            header = f"Grado {degree}"
+            if degree <= i:
+                row[header] = f"{float(tableau[i][degree]):.2f}"
+            else:
+                row[header] = "—"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _render_neville_process(interps: list[dict]) -> None:
+    st.markdown("**Neville · último paquete perdido**")
+    st.latex(
+        r"Q_{i,j}=\frac{(t^*-t_{i-j})\,Q_{i,j-1}-(t^*-t_i)\,Q_{i-1,j-1}}{t_i-t_{i-j}}"
+    )
+    if not interps:
+        st.caption("Neville entra al detectar un salto de identificador, con tres paquetes ya recibidos y el que cierra la brecha.")
+        return
+
+    item = interps[-1]
+    nodes_x = item.get("nodes_x")
+    tableau_x = item.get("tableau_x")
+    if not nodes_x or not tableau_x:
+        st.caption(
+            f"Hueco del paquete {int(item['id']):02d} en t* = {item['timestamp']:.4f} rad · "
+            f"X = {item['x']:.2f} km · Y = {item['y']:.2f} km. "
+            "Lanza de nuevo la misión para ver cada celda de la tabla triangular."
+        )
+        return
+
+    axis = st.segmented_control(
+        "Coordenada",
+        ["X", "Y"],
+        default="X",
+        key="eje_neville_vivo",
+    )
+    chosen = axis or "X"
+    points = item["nodes_x"] if chosen == "X" else item["nodes_y"]
+    tableau = item["tableau_x"] if chosen == "X" else item["tableau_y"]
+    target_t = float(item["timestamp"])
+    n = len(points)
+
+    st.caption(
+        f"Paquete {int(item['id']):02d} · t* = {target_t:.4f} rad · "
+        f"nodos que sí llegaron, coordenada {chosen}."
+    )
+    st.markdown("**Grado 0** · los valores son la telemetría recibida.")
+    degree_zero = ", ".join(
+        f"$Q_{{{i},0}}={float(points[i][1]):.2f}$" for i in range(n)
+    )
+    st.markdown(degree_zero)
+    st.markdown(_neville_substitutions(points, tableau, target_t))
+    st.table(
+        _neville_frame(points, tableau),
+        hide_index=True,
+        alt=f"Tabla triangular de Neville para la coordenada {chosen}",
+    )
+    if n > 1:
+        estimate = float(tableau[n - 1][n - 1])
+        previous = float(tableau[n - 1][n - 2])
+        bound = abs(estimate - previous)
+        st.latex(
+            rf"\mathrm{{cota}}=|Q_{{{n - 1},{n - 1}}}-Q_{{{n - 1},{n - 2}}}|"
+            rf"=|{estimate:.2f}-{previous:.2f}|={bound:.4f}\ \mathrm{{km}}"
+        )
+
+
+def _render_romberg_process(romberg_res, bounds: tuple[float, float] | None) -> None:
+    st.markdown("**Romberg · distancia recorrida**")
+    st.latex(
+        r"S=\int_{t_0}^{t_f}v(t)\,dt,\qquad "
+        r"R_{i,j}=\frac{4^j R_{i,j-1}-R_{i-1,j-1}}{4^j-1}"
+    )
+    if romberg_res is None or not romberg_res.tableau:
+        st.caption("Romberg arranca al acumular tres muestras de velocidad a lo largo del arco.")
+        return
+
+    tableau = romberg_res.tableau
+    if bounds is not None:
+        t0, t1 = bounds
+        st.latex(
+            rf"R_{{0,0}}=\frac{{t_f-t_0}}{{2}}\left(v(t_0)+v(t_f)\right)"
+            rf"={tableau[0][0]:.2f}\ \mathrm{{km}}"
+            rf",\quad t_0={t0:.4f},\ t_f={t1:.4f}"
+        )
+
+    order = len(tableau) - 1
+    rows = []
+    for i, row_vals in enumerate(tableau):
+        row = {"Nivel": i}
+        for j in range(order + 1):
+            header = "Trapecio" if j == 0 else f"Richardson {j}"
+            if j < len(row_vals):
+                row[header] = f"{row_vals[j]:.2f}"
+            else:
+                row[header] = "—"
+        rows.append(row)
+    st.table(pd.DataFrame(rows), hide_index=True, alt="Tabla de extrapolación de Romberg del arco orbital")
+
+    if order >= 1:
+        factor = 4 ** order
+        left = float(tableau[order][order - 1])
+        up = float(tableau[order - 1][order - 1])
+        value = (factor * left - up) / (factor - 1.0)
+        st.latex(
+            rf"R_{{{order},{order}}}"
+            rf"=\frac{{{factor}\cdot {left:.2f}-{up:.2f}}}{{{factor}-1}}"
+            rf"={value:.2f}\ \mathrm{{km}}"
+        )
+    st.caption(
+        f"{romberg_res.method} · {romberg_res.function_evaluations} evaluaciones de v(t) · "
+        f"cota {romberg_res.estimated_error:.3e} km."
+    )
+
+
+def render_calculation_process(
+    packets: list[dict],
+    interps: list[dict],
+    romberg_res,
+    romberg_bounds: tuple[float, float] | None,
+) -> None:
+    st.subheader("Cálculo en vivo", divider=True, icon=":material/function:")
+    st.caption("Cada refresco reescribe el paquete en antena, el último hueco de Neville y el arco de Romberg.")
+
+    st.markdown("**Bitácora de la misión**")
+    recent_packets = [_newton_log_line(pkt) for pkt in packets[-4:]]
+    recent_packets.reverse()
+    st.markdown(f"**{recent_packets[0]}**")
+    if len(recent_packets) > 1:
+        st.markdown("\n".join(f"- {line}" for line in recent_packets[1:]))
+    if interps:
+        recent_gaps = [_neville_log_line(item) for item in interps[-4:]]
+        recent_gaps.reverse()
+        st.markdown("**Huecos reconstruidos**")
+        st.markdown("\n".join(f"- {line}" for line in recent_gaps))
+
+    _render_newton_process(packets[-1])
+    st.divider()
+    _render_neville_process(interps)
+    st.divider()
+    _render_romberg_process(romberg_res, romberg_bounds)
+
+
+# --------------------------------------------------------------------------- #
 # Fragmento Reactivo en Tiempo Real
 # --------------------------------------------------------------------------- #
 def telemetry_dashboard(hub: OrbitalTelemetryHub, launcher: SatelliteLauncher) -> None:
@@ -510,6 +822,7 @@ def telemetry_dashboard(hub: OrbitalTelemetryHub, launcher: SatelliteLauncher) -
     loss_pct = (dropped / (total_rx + dropped) * 100) if (total_rx + dropped) > 0 else 0
     arc_len = 0.0
     romberg_res = None
+    romberg_bounds = None
 
     if total_rx >= 4:
         xs = [p["x"] for p in packets]
@@ -544,6 +857,7 @@ def telemetry_dashboard(hub: OrbitalTelemetryHub, launcher: SatelliteLauncher) -
 
             try:
                 romberg_res = romberg_integration(_eval_speed, speed_ts[0], speed_ts[-1], max_order=4)
+                romberg_bounds = (speed_ts[0], speed_ts[-1])
             except Exception:
                 romberg_res = None
 
@@ -559,6 +873,9 @@ def telemetry_dashboard(hub: OrbitalTelemetryHub, launcher: SatelliteLauncher) -
         arc_txt = f"{arc_len:.0f}" if arc_len > 0 else "—"
         romberg_txt = f"Romberg: {romberg_res.value:.0f} km" if romberg_res else "Calculando…"
         st.markdown(kpi("Distancia Orbital", arc_txt, " km", romberg_txt, OK), unsafe_allow_html=True)
+
+    if total_rx > 0:
+        render_direct_ticker(packets, interps)
 
     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
@@ -693,6 +1010,9 @@ def telemetry_dashboard(hub: OrbitalTelemetryHub, launcher: SatelliteLauncher) -
         fig_ts.update_xaxes(gridcolor=LINE, zerolinecolor=LINE)
         fig_ts.update_yaxes(gridcolor=LINE, zerolinecolor=LINE)
         st.plotly_chart(fig_ts, key="chart_ts_view", width="stretch")
+
+    if total_rx > 0:
+        render_calculation_process(packets, interps, romberg_res, romberg_bounds)
 
     # Tabla de auditoría numérica
     if interps:

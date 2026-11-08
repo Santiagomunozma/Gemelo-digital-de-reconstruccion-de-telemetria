@@ -120,12 +120,34 @@ def run_satellite():
             # Resuelve Kepler con Newton-Raphson sobre los parámetros reales
             pos = compute_orbital_coordinates(t, ecc, semi_axis)
 
+            meta = pos.solver_metadata
             payload = {
                 "id": i,
                 "timestamp": round(t, 4),
                 "x": round(pos.x, 2),
                 "y": round(pos.y, 2),
-                "sat_name": sat_name
+                "sat_name": sat_name,
+                "kepler": {
+                    "M": t,
+                    "e": ecc,
+                    "a": semi_axis,
+                    "E": meta.eccentric_anomaly,
+                    "nu": pos.true_anomaly,
+                    "iterations": meta.iterations,
+                    "residual": meta.residual_error,
+                    "converged": meta.converged,
+                    "steps": [
+                        {
+                            "k": step.iteration,
+                            "E": step.estimate,
+                            "f": step.function_value,
+                            "fp": step.derivative,
+                            "delta": step.correction,
+                            "E_next": step.next_estimate,
+                        }
+                        for step in meta.trace
+                    ],
+                },
             }
 
             # Simulación de pérdida en el canal físico UDP (80% de tasa de caída en blackout)

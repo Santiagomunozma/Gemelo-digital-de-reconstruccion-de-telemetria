@@ -4,11 +4,24 @@ from typing import Optional
 
 
 @dataclass(frozen=True)
+class NewtonIteration:
+    """Un paso de Newton-Raphson: E_k, f(E_k), f'(E_k) y la corrección."""
+
+    iteration: int
+    estimate: float
+    function_value: float
+    derivative: float
+    correction: float
+    next_estimate: float
+
+
+@dataclass(frozen=True)
 class NumericalResult:
     eccentric_anomaly: float
     iterations: int
     residual_error: float
     converged: bool
+    trace: tuple[NewtonIteration, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,6 +54,8 @@ def solve_kepler_newton(
     else:
         e_k = math.pi if m_norm > math.pi else m_norm + eccentricity * math.sin(m_norm)
 
+    trace: list[NewtonIteration] = []
+
     for step in range(1, max_iter + 1):
         f_val = e_k - eccentricity * math.sin(e_k) - m_norm
         f_prime = 1.0 - eccentricity * math.cos(e_k)
@@ -51,6 +66,16 @@ def solve_kepler_newton(
 
         delta = f_val / f_prime
         e_next = e_k - delta
+        trace.append(
+            NewtonIteration(
+                iteration=step,
+                estimate=e_k,
+                function_value=f_val,
+                derivative=f_prime,
+                correction=delta,
+                next_estimate=e_next,
+            )
+        )
 
         if abs(delta) < tolerance:
             final_residual = abs(e_next - eccentricity * math.sin(e_next) - m_norm)
@@ -59,6 +84,7 @@ def solve_kepler_newton(
                 iterations=step,
                 residual_error=final_residual,
                 converged=True,
+                trace=tuple(trace),
             )
 
         e_k = e_next
@@ -70,6 +96,7 @@ def solve_kepler_newton(
         iterations=max_iter,
         residual_error=final_residual,
         converged=False,
+        trace=tuple(trace),
     )
 
 
